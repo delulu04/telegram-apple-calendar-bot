@@ -175,12 +175,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         + tags +
         "\n\n🗑 <b>Delete:</b> delete gym (add a date if there are a few: delete gym 16/11)\n"
         "📅 <b>See what's on:</b> /today /tomorrow /week /month, or one day like /18dec or /fri\n"
-        "↩️ /undo removes the last event I added\n\n"
-        "🔔 I'll also message you when something new shows up in your calendar "
-        "(like an invite from an email), moves, or gets cancelled.",
+        "↩️ /undo removes the last event I added"
+        + ("\n\n🔔 I'll also message you when something new shows up in your calendar "
+           "(like an invite from an email), moves, or gets cancelled." if WATCH_MINUTES > 0 else ""),
         parse_mode="HTML",
     )
-    if not os.getenv("NOTIFY_CHAT_ID"):
+    if WATCH_MINUTES > 0 and not os.getenv("NOTIFY_CHAT_ID"):
         await update.message.reply_text(
             f"To keep those alerts working after I restart, add NOTIFY_CHAT_ID={update.effective_chat.id} "
             "to the bot's settings (Railway → Variables).")

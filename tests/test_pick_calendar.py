@@ -161,3 +161,22 @@ def test_start_still_works_if_icloud_is_down(env, monkeypatch):
 def test_start_escapes_html_in_name(env):
     _, ctx = env
     assert "&lt;b&gt;" in start(ctx, "<b>").args[0]
+
+
+def test_start_hides_alerts_when_watching_is_off(env, monkeypatch):
+    _, ctx = env
+    monkeypatch.setattr(bot, "WATCH_MINUTES", 0)
+    monkeypatch.delenv("NOTIFY_CHAT_ID", raising=False)
+    msg = SimpleNamespace(reply_text=AsyncMock())
+    upd = SimpleNamespace(message=msg, effective_user=SimpleNamespace(id=1, first_name="Delia"),
+                          effective_chat=SimpleNamespace(id=1))
+    asyncio.run(bot.start_cmd(upd, ctx))
+    texts = [c.args[0] for c in msg.reply_text.call_args_list]
+    assert len(texts) == 1  # no NOTIFY_CHAT_ID nudge
+    assert "🔔" not in texts[0]
+
+
+def test_start_mentions_alerts_when_watching_is_on(env, monkeypatch):
+    _, ctx = env
+    monkeypatch.setattr(bot, "WATCH_MINUTES", 5)
+    assert "🔔" in start(ctx).args[0]
