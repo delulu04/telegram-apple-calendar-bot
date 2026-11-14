@@ -4,6 +4,7 @@ Pure Python (stdlib + dateutil) so it can be tested without Telegram or iCloud.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -64,8 +65,24 @@ def _roll_year(d_month: int, d_day: int, today: date) -> date:
     return candidate
 
 
+_BARE_WD_RE = re.compile(rf"(?:\bthis\s+)?\b({_WD})\b\.?,?", re.I)
+
+
 def _extract_date(text: str, today: date):
-    """Return (date or None, weekday_is_bare, text with the date removed)."""
+    """Return (date or None, weekday_is_bare, text with the date removed).
+
+    A weekday written next to a real date ("mon 16 nov") is dropped when it matches
+    that date. If it doesn't match, it's left in the title ("Friday feels 15 nov").
+    """
+    d, bare, rest = _extract_date_only(text, today)
+    if d is not None:
+        m = _BARE_WD_RE.search(rest)
+        if m and WEEKDAYS[m[1].lower()] == d.weekday():
+            rest = " ".join((rest[: m.start()] + " " + rest[m.end():]).split())
+    return d, bare, rest
+
+
+def _extract_date_only(text: str, today: date):
     for kind, pat in DATE_PATTERNS:
         m = pat.search(text)
         if not m:
@@ -193,8 +210,14 @@ SINGLE_MERIDIEM_RE = re.compile(r"\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\
 SINGLE_24H_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
 AT_BARE_RE = re.compile(r"(?:\bat|@)\s*(\d{1,2})\b(?!\s*(?:/|\d))", re.I)
 WORD_TIME_RE = re.compile(r"\b(?:12\s*)?(noon|midday|midnight)\b", re.I)
+# "for 2h", "2h", "1.5hrs", "90min", "1h30", "1h 30min", "for 45m" (bare "45m" needs "for")
 DURATION_RE = re.compile(
-    r"\bfor\s+(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b", re.I)
+    r"(?:\bfor\s+)?\b(?:"
+    r"(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)"
+    r"(?:(\d{1,2})(?:m|min|mins)?|\s+(\d{1,2})\s*(?:m|min|mins|minute|minutes))?"
+    r"|(\d+)\s*(?:min|mins|minute|minutes)"
+    r")\b"
+    r"|\bfor\s+(\d+)\s*m\b", re.I)
 ALL_DAY_RE = re.compile(r"\ball[\s-]?day\b", re.I)
 
 
@@ -234,9 +257,10 @@ def _extract_times(text: str):
     duration = None
     m = DURATION_RE.search(text)
     if m:
-        qty = float(m[1])
-        unit = m[2].lower()
-        duration = timedelta(hours=qty) if unit.startswith("h") else timedelta(minutes=qty)
+        if m[1]:
+            duration = timedelta(hours=float(m[1]), minutes=int(m[2] or m[3] or 0))
+        else:
+            duration = timedelta(minutes=int(m[4] or m[5]))
         text = (text[: m.start()] + " " + text[m.end():]).strip()
 
     m = RANGE_RE.search(text)
@@ -290,6 +314,8 @@ def _clean_title(text: str) -> str:
     while words and words[-1].lower() in FILLER:
         words.pop()
     title = " ".join(words).strip(" ,.-")
+    if os.getenv("CAPITALISE_TITLES", "true").lower() == "false":
+        return title  # keep exactly as typed: "gym", "brunch w ash"
     return title[:1].upper() + title[1:] if title else ""
 
 

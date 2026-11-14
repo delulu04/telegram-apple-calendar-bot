@@ -107,6 +107,28 @@ class ICloudCalendar:
         else:
             self.check = self.calendars
 
+        self._event_cals: list | None = None
+
+    def event_calendars(self) -> list:
+        """Calendars that hold events (skips Reminders lists). Cached after the first call."""
+        if self._event_cals is None:
+            cals = []
+            for cal in self.calendars:
+                try:
+                    if "VEVENT" not in cal.get_supported_components():
+                        continue
+                except Exception:
+                    pass  # can't tell, so keep it
+                cals.append(cal)
+            self._event_cals = cals or list(self.calendars)
+        return self._event_cals
+
+    def calendar_named(self, name: str):
+        for cal in self.event_calendars():
+            if (cal.name or "") == name:
+                return cal
+        raise RuntimeError(f"Calendar '{name}' not found.")
+
     # ------------------------------------------------------------ reading
 
     def _feed_icals(self, max_age: float = 120):
@@ -281,8 +303,8 @@ class ICloudCalendar:
     # ------------------------------------------------------------ writing
 
     def add_event(self, title: str, start: datetime, end: datetime,
-                  all_day: bool, rrule: str | None, free: bool = False) -> str:
-        """Create the event. Returns its URL (used by /undo)."""
+                  all_day: bool, rrule: str | None, free: bool = False, calendar=None) -> str:
+        """Create the event in `calendar` (default: CALENDAR_NAME). Returns its URL (used by /undo)."""
         cal = Calendar()
         cal.add("prodid", "-//telegram-calendar-bot//EN")
         cal.add("version", "2.0")
@@ -305,7 +327,7 @@ class ICloudCalendar:
             cal.add_missing_timezones()  # embeds the VTIMEZONE so Apple reads the time right
         except AttributeError:
             pass  # older icalendar; iCloud still understands TZID=Asia/Singapore
-        created = self.target.save_event(cal.to_ical().decode())
+        created = (calendar or self.target).save_event(cal.to_ical().decode())
         return str(created.url)
 
     def delete_event(self, url: str) -> None:

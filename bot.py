@@ -19,6 +19,7 @@ from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Upd
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes, MessageHandler, filters)
 
+from calendar_tags import extract_tag, match_calendar
 from event_parser import ParseError, _extract_date, _extract_range, parse_event
 from icloud_calendar import REPEAT_RULES, ICloudCalendar
 from watcher import Watcher
@@ -32,6 +33,8 @@ ALLOWED_IDS = {int(x) for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").replace(" "
 ALLOWED_USERNAMES = {u.strip().lstrip("@").lower()
                      for u in os.getenv("ALLOWED_TELEGRAM_USERNAMES", "").split(",") if u.strip()}
 INCLUDE_ALL_DAY = os.getenv("ALL_DAY_COUNTS_AS_CONFLICT", "false").lower() == "true"
+# true: choose a calendar per event with a #tag, or buttons if there is no tag
+PICK_CALENDAR = os.getenv("PICK_CALENDAR", "false").lower() == "true"
 
 REPEAT_LABELS = {
     "none": "Doesn't repeat",
@@ -115,30 +118,77 @@ def repeat_keyboard(key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def calendar_keyboard(key: str, names: list[str]) -> InlineKeyboardMarkup:
+    """Calendar buttons, 3 per row. Buttons carry the list index (Telegram caps button data at 64 bytes)."""
+    btns = [InlineKeyboardButton(n or "?", callback_data=f"c|{key}|{i}") for i, n in enumerate(names)]
+    rows = [btns[i:i + 3] for i in range(0, len(btns), 3)]
+    rows.append([InlineKeyboardButton("Cancel", callback_data=f"x|{key}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def event_header(ev, cal_name: str | None) -> str:
+    head = f"📅 <b>{html.escape(ev.title)}</b>\n{fmt_when(ev.start, ev.end, ev.all_day)}"
+    return head + (f"\n🗂 {html.escape(cal_name)}" if cal_name else "")
+
+
+def next_step(ev, key: str) -> tuple[str, InlineKeyboardMarkup]:
+    """After the calendar is known: trips get Add/Cancel, everything else gets the repeat buttons."""
+    if ev.all_day and (ev.end - ev.start).days > 1:
+        return "Add it?", InlineKeyboardMarkup([[
+            InlineKeyboardButton("Add", callback_data=f"r|{key}|none"),
+            InlineKeyboardButton("Cancel", callback_data=f"x|{key}"),
+        ]])
+    return "Repeat?", repeat_keyboard(key)
+
+
 # ------------------------------------------------------------ handlers
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         await update.message.reply_text(f"Not authorised. Your Telegram ID is {update.effective_user.id}.")
         return
+    name = html.escape(update.effective_user.first_name or "there")
+    tags = ""
+    if PICK_CALENDAR:
+        try:
+            cal = await asyncio.to_thread(get_calendar)
+            cals = await asyncio.to_thread(cal.event_calendars)
+            names = [_tag_name(c.name or "") for c in cals]
+            tags = ("\n\n🗂 <b>Your calendars</b>, add one as a tag (the start of a name works too, like #sch):\n"
+                    + " · ".join(f"#{n}" for n in names if n))
+        except Exception:
+            log.exception("couldn't list calendars for /start")
     await update.message.reply_text(
-        "Send me an event in plain text, for example:\n"
-        "• Football next tuesday 8-10pm\n"
-        "• Dentist 12 nov 3pm\n"
-        "• Dinner with Sandra fri 7:30pm for 2h\n"
-        "• Sandra's birthday 14/12 (no time = all day)\n"
-        "• In Korea 21/12-7/1 (trip banner, never a clash)\n\n"
-        "To delete: send “delete footie” (or delete + part of the title, optionally a date). "
-        "I'll show matches and ask before deleting anything.\n\n"
-        "/today, /tomorrow, /week and /month show what's coming up, /day 18 dec (or /18dec, /fri) shows one day. /where shows which trip you're on "
-        "(e.g. /where 18 dec), /undo removes the last event I added.\n\n"
-        "I also watch your calendar and message you when something new appears "
-        "(like an interview from an email), moves, or gets cancelled."
+        f"👋 Hi {name}! Text me an event and I'll put it in your calendar.\n\n"
+        "✍️ <b>Write it like this</b>\n"
+        + ("• IS4234 lect wed 2-4pm #sch\n"
+           "• gym mon 7pm 2h #workout\n"
+           "• brunch w ash sat 11am (no tag: I'll ask which calendar)\n"
+           if PICK_CALENDAR else
+           "• IS4234 lect wed 2-4pm\n"
+           "• gym mon 7pm 2h\n"
+           "• brunch w ash sat 11am\n") +
+        "• monthsary 21/11 (no time = all day)\n"
+        "• Bali 16-20 dec (trip banner, never a clash)\n\n"
+        "⏱ <b>How long:</b> 7-9pm, 2h, 90min or 1h30. Otherwise 1 hour.\n"
+        "🔁 Then I'll ask if it repeats, e.g. weekly for lectures and tuition."
+        + tags +
+        "\n\n🗑 <b>Delete:</b> delete gym (add a date if there are a few: delete gym 16/11)\n"
+        "📅 <b>See what's on:</b> /today /tomorrow /week /month, or one day like /18dec or /fri\n"
+        "↩️ /undo removes the last event I added\n\n"
+        "🔔 I'll also message you when something new shows up in your calendar "
+        "(like an invite from an email), moves, or gets cancelled.",
+        parse_mode="HTML",
     )
     if not os.getenv("NOTIFY_CHAT_ID"):
         await update.message.reply_text(
             f"To keep those alerts working after I restart, add NOTIFY_CHAT_ID={update.effective_chat.id} "
             "to the bot's settings (Railway → Variables).")
+
+
+def _tag_name(name: str) -> str:
+    """Calendar name as a tag: "EXTRA SCHOOL" -> "extraschool"."""
+    return "".join(ch for ch in name.lower() if ch.isalnum())
 
 
 DELETE_RE = re.compile(r"^\s*(?:delete|remove|del|cancel)\b\s*(.*)$", re.I | re.S)
@@ -262,23 +312,38 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await delete_flow(update, context, m[1])
         return
     now = datetime.now(TZ).replace(tzinfo=None)
+    text, tag = extract_tag(update.message.text) if PICK_CALENDAR else (update.message.text, None)
     try:
-        ev = parse_event(update.message.text, now)
+        ev = parse_event(text, now)
     except ParseError as exc:
         await update.message.reply_text(str(exc))
         return
 
     key = secrets.token_hex(4)
     context.user_data.setdefault("pending", {})[key] = ev
-    multi_day = ev.all_day and (ev.end - ev.start).days > 1
-    await update.message.reply_text(
-        f"📅 <b>{html.escape(ev.title)}</b>\n{fmt_when(ev.start, ev.end, ev.all_day)}\n\n" + ("Add it?" if multi_day else "Repeat?"),
-        parse_mode="HTML",
-        reply_markup=(InlineKeyboardMarkup([[
-            InlineKeyboardButton("Add", callback_data=f"r|{key}|none"),
-            InlineKeyboardButton("Cancel", callback_data=f"x|{key}"),
-        ]]) if multi_day else repeat_keyboard(key)),
-    )
+
+    if PICK_CALENDAR:
+        try:
+            cal = await asyncio.to_thread(get_calendar)
+            names = [c.name or "?" for c in await asyncio.to_thread(cal.event_calendars)]
+        except Exception as exc:
+            log.exception("listing calendars failed")
+            await update.message.reply_text(f"⚠️ Couldn't read iCloud: {exc}")
+            return
+        chosen = match_calendar(tag, names) if tag else None
+        if chosen is None:
+            context.user_data.setdefault("cal_names", {})[key] = names
+            miss = f"No calendar matches #{html.escape(tag)}. " if tag else ""
+            await update.message.reply_text(
+                event_header(ev, None) + f"\n\n{miss}Which calendar?",
+                parse_mode="HTML", reply_markup=calendar_keyboard(key, names))
+            return
+        context.user_data.setdefault("cal_for", {})[key] = chosen
+
+    prompt, kb = next_step(ev, key)
+    cal_name = context.user_data.get("cal_for", {}).get(key)
+    await update.message.reply_text(event_header(ev, cal_name) + f"\n\n{prompt}",
+                                    parse_mode="HTML", reply_markup=kb)
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -298,14 +363,29 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("That one expired. Just send it again.")
         return
 
+    cal_for = context.user_data.setdefault("cal_for", {})
     if action == "x":
         pending.pop(key, None)
+        cal_for.pop(key, None)
         await query.edit_message_text(f"Cancelled: {ev.title}")
+        return
+
+    if action == "c":  # calendar picked from the buttons
+        names = context.user_data.get("cal_names", {}).pop(key, None)
+        idx = int(parts[2])
+        if not names or idx >= len(names):
+            await query.edit_message_text("That one expired. Just send it again.")
+            return
+        cal_for[key] = names[idx]
+        prompt, kb = next_step(ev, key)
+        await query.edit_message_text(event_header(ev, names[idx]) + f"\n\n{prompt}",
+                                      parse_mode="HTML", reply_markup=kb)
         return
 
     repeat = parts[2]
     rrule = REPEAT_RULES[repeat]
-    header = f"📅 <b>{html.escape(ev.title)}</b>\n{fmt_when(ev.start, ev.end, ev.all_day)}\n🔁 {REPEAT_LABELS[repeat]}"
+    cal_name = cal_for.get(key)
+    header = event_header(ev, cal_name) + f"\n🔁 {REPEAT_LABELS[repeat]}"
 
     if action == "r":  # repeat chosen: check clashes first
         await query.edit_message_text(header + "\n\nChecking your calendar…", parse_mode="HTML")
@@ -343,16 +423,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         cal = await asyncio.to_thread(get_calendar)
+        dest = await asyncio.to_thread(cal.calendar_named, cal_name) if cal_name else cal.target
         url = await asyncio.to_thread(cal.add_event, ev.title, ev.start.replace(tzinfo=TZ),
-                                      ev.end.replace(tzinfo=TZ), ev.all_day, rrule, ev.free)
+                                      ev.end.replace(tzinfo=TZ), ev.all_day, rrule, ev.free, dest)
     except Exception as exc:
         log.exception("save failed")
         await query.edit_message_text(header + f"\n\n⚠️ Couldn't save: {html.escape(str(exc))}", parse_mode="HTML")
         return
 
     pending.pop(key, None)
+    cal_for.pop(key, None)
     context.user_data["last_added"] = (url, ev.title)
-    await query.edit_message_text(header + f"\n\n{note}. Saved to {html.escape(cal.target.name or 'calendar')}.",
+    await query.edit_message_text(header + f"\n\n{note}. Saved to {html.escape(dest.name or 'calendar')}.",
                                   parse_mode="HTML")
 
 

@@ -35,6 +35,14 @@ Rules worth knowing:
 
 Date ranges become all-day events marked **Free**, so a trip shows where you are without blocking anything or triggering clash warnings.
 
+## Choosing a calendar (optional)
+
+If you colour-code with several calendars, set `PICK_CALENDAR=true`. Then:
+- Add a tag to send it straight to a calendar: `Tutorial thurs 10-12pm #school`. Tags ignore case and spaces, and a short start works if it's unique (`#sch`, `#extra` for EXTRA SCHOOL).
+- No tag (or one that matches nothing, or several calendars): the bot shows a button for each calendar.
+
+Leave it `false` to send everything to `CALENDAR_NAME`, exactly as before.
+
 ## Deleting events
 
 Send `delete` plus part of the title, e.g. `delete footie` (also works with `remove`, `cancel` or `/delete`). Add a date if there are many matches: `delete footie 12/11`. Plain `delete` lists the next 2 weeks.
