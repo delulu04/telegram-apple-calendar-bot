@@ -83,7 +83,8 @@ class ICloudCalendar:
         self.feeds = feeds or []          # [(name, ics_url)] read-only, e.g. Google Calendar
         self._feed_cache: dict[str, tuple[float, Calendar]] = {}
         self.feed_errors: set[str] = set()
-        self.client = caldav.DAVClient(url=ICLOUD_URL, username=apple_id, password=app_password)
+        self.client = caldav.DAVClient(url=ICLOUD_URL, username=apple_id, password=app_password,
+                                      timeout=30)  # seconds; a hung request raises instead of waiting forever
         self.principal = self.client.principal()
         self.calendars = self.principal.calendars()
         if not self.calendars:

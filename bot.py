@@ -11,6 +11,7 @@ import re
 import logging
 import os
 import secrets
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -61,9 +62,37 @@ def _parse_feeds(raw: str) -> list[tuple[str, str]]:
 
 
 calendar: ICloudCalendar | None = None
+_calendar_lock = threading.Lock()
+
+# Longest we wait for iCloud before giving up, so one stuck request can't freeze the bot
+ICLOUD_TIMEOUT = float(os.getenv("ICLOUD_TIMEOUT", "45"))
+
+
+async def icloud(fn, *args, **kwargs):
+    """Run an iCloud call off the event loop, with a time limit.
+
+    On a timeout or error the cached connection is dropped, so the next message reconnects
+    instead of reusing a connection that went stale (e.g. overnight).
+    """
+    global calendar
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), ICLOUD_TIMEOUT)
+    except asyncio.TimeoutError:
+        calendar = None
+        log.warning("iCloud call %s timed out after %ss", getattr(fn, "__name__", fn), ICLOUD_TIMEOUT)
+        raise RuntimeError("iCloud didn't answer in time. Send it again in a moment.") from None
+    except Exception:
+        calendar = None
+        raise
 
 
 def get_calendar() -> ICloudCalendar:
+    global calendar
+    with _calendar_lock:
+        return _connect()
+
+
+def _connect() -> ICloudCalendar:
     global calendar
     if calendar is None:
         check = os.getenv("CHECK_CALENDARS")
@@ -151,8 +180,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tags = ""
     if PICK_CALENDAR:
         try:
-            cal = await asyncio.to_thread(get_calendar)
-            cals = await asyncio.to_thread(cal.event_calendars)
+            cal = await icloud(get_calendar)
+            cals = await icloud(cal.event_calendars)
             names = [_tag_name(c.name or "") for c in cals]
             tags = ("\n\n🗂 <b>Your calendars</b>, add one as a tag (the start of a name works too, like #sch):\n"
                     + " · ".join(f"#{n}" for n in names if n))
@@ -206,11 +235,11 @@ async def delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, q: str
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     q = q.strip()
     try:
-        cal = await asyncio.to_thread(get_calendar)
+        cal = await icloud(get_calendar)
         if not q:
-            matches = await asyncio.to_thread(cal.find_occurrences, now, today + timedelta(days=14))
+            matches = await icloud(cal.find_occurrences, now, today + timedelta(days=14))
         else:
-            matches = await asyncio.to_thread(cal.find_occurrences, today,
+            matches = await icloud(cal.find_occurrences, today,
                                               today + timedelta(days=DELETE_WINDOW_DAYS), q)
             if not matches:  # maybe they included a date: "delete football tue" / "delete tw 16-21 dec"
                 try:
@@ -223,7 +252,7 @@ async def delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, q: str
                 if first is not None:
                     d0 = datetime.combine(first, datetime.min.time(), tzinfo=TZ)
                     d1 = datetime.combine(last, datetime.min.time(), tzinfo=TZ) + timedelta(days=1)
-                    matches = await asyncio.to_thread(cal.find_occurrences, d0, d1,
+                    matches = await icloud(cal.find_occurrences, d0, d1,
                                                       rest.strip() or None)
     except Exception as exc:
         log.exception("delete search failed")
@@ -288,8 +317,8 @@ async def on_delete_button(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         mode = parts[2]
         await query.edit_message_text(header + "\n\nDeleting…", parse_mode="HTML")
         try:
-            cal = await asyncio.to_thread(get_calendar)
-            result = await asyncio.to_thread(cal.delete_occurrence, occ, mode)
+            cal = await icloud(get_calendar)
+            result = await icloud(cal.delete_occurrence, occ, mode)
         except Exception as exc:
             log.exception("delete failed")
             await query.edit_message_text(header + f"\n\n⚠️ Couldn't delete: {html.escape(str(exc))}",
@@ -324,8 +353,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if PICK_CALENDAR:
         try:
-            cal = await asyncio.to_thread(get_calendar)
-            names = [c.name or "?" for c in await asyncio.to_thread(cal.event_calendars)]
+            cal = await icloud(get_calendar)
+            names = [c.name or "?" for c in await icloud(cal.event_calendars)]
         except Exception as exc:
             log.exception("listing calendars failed")
             await update.message.reply_text(f"⚠️ Couldn't read iCloud: {exc}")
@@ -391,8 +420,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(header + "\n\nChecking your calendar…", parse_mode="HTML")
         start, end = ev.start.replace(tzinfo=TZ), ev.end.replace(tzinfo=TZ)
         try:
-            cal = await asyncio.to_thread(get_calendar)
-            clashes = [] if ev.all_day else await asyncio.to_thread(
+            cal = await icloud(get_calendar)
+            clashes = [] if ev.all_day else await icloud(
                 cal.find_conflicts, start, end, rrule, include_all_day=INCLUDE_ALL_DAY)
         except Exception as exc:
             log.exception("conflict check failed")
@@ -422,9 +451,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         note = "Added despite clashes"
 
     try:
-        cal = await asyncio.to_thread(get_calendar)
-        dest = await asyncio.to_thread(cal.calendar_named, cal_name) if cal_name else cal.target
-        url = await asyncio.to_thread(cal.add_event, ev.title, ev.start.replace(tzinfo=TZ),
+        cal = await icloud(get_calendar)
+        dest = await icloud(cal.calendar_named, cal_name) if cal_name else cal.target
+        url = await icloud(cal.add_event, ev.title, ev.start.replace(tzinfo=TZ),
                                       ev.end.replace(tzinfo=TZ), ev.all_day, rrule, ev.free, dest)
     except Exception as exc:
         log.exception("save failed")
@@ -459,8 +488,8 @@ async def undo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     url, title = last
     try:
-        cal = await asyncio.to_thread(get_calendar)
-        await asyncio.to_thread(cal.delete_event, url)
+        cal = await icloud(get_calendar)
+        await icloud(cal.delete_event, url)
     except Exception as exc:
         await update.message.reply_text(f"Couldn't remove it: {exc}")
         return
@@ -484,9 +513,9 @@ def _trip_line(o) -> str:
 
 async def send_agenda(update: Update, start: datetime, end: datetime, empty: str):
     try:
-        cal = await asyncio.to_thread(get_calendar)
+        cal = await icloud(get_calendar)
         day0 = start.replace(hour=0, minute=0, second=0, microsecond=0)
-        occs = await asyncio.to_thread(cal.find_occurrences, day0, end)
+        occs = await icloud(cal.find_occurrences, day0, end)
         trips = _trips(occs)
         trip_ids = {id(t) for t in trips}
         # list everything, including events marked Free (they just don't count as clashes)
@@ -625,8 +654,8 @@ async def where_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         day = parsed
     d0 = datetime.combine(day, datetime.min.time(), tzinfo=TZ)
     try:
-        cal = await asyncio.to_thread(get_calendar)
-        trips = _trips(await asyncio.to_thread(cal.find_occurrences, d0, d0 + timedelta(days=1)))
+        cal = await icloud(get_calendar)
+        trips = _trips(await icloud(cal.find_occurrences, d0, d0 + timedelta(days=1)))
     except Exception as exc:
         await update.message.reply_text(f"Couldn't read iCloud: {exc}")
         return
@@ -701,7 +730,7 @@ async def watch_loop(application):
         return
     while True:
         try:
-            messages = await asyncio.to_thread(poll_calendar)
+            messages = await icloud(poll_calendar)
             if messages and NOTIFY_CHAT_ID:
                 for m in messages:
                     await application.bot.send_message(NOTIFY_CHAT_ID, m, parse_mode="HTML")
@@ -733,7 +762,8 @@ def main():
         ])
         application.create_task(watch_loop(application))
 
-    app = Application.builder().token(token).post_init(post_init).build()
+    app = (Application.builder().token(token).post_init(post_init)
+           .concurrent_updates(True).build())
     app.add_handler(CommandHandler(["start", "help"], start_cmd))
     app.add_handler(CommandHandler("undo", undo_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
