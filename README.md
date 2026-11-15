@@ -1,8 +1,13 @@
 # Delz Calendar Bot
 
-A Telegram bot by Delia that adds events to Apple Calendar.
+Text an event to a Telegram bot and it goes straight into your Apple Calendar.
 
-Type an event in Telegram, tap how often it repeats, and it lands in your iCloud calendar (so it shows on your iPhone, Mac and iPad). Before saving, the bot checks your calendars and warns you about clashes. If you colour-code with several calendars, add a `#tag` to pick which one.
+- **Plain-text events:** `gym mon 7pm 2h`, `dentist 12 nov 3pm`, `bali 16-20 dec`
+- **Clash warnings** before anything is saved, across all your calendars
+- **Pick a calendar** with a tag (`#school`, `#workout`) or tap a button
+- **Repeating events:** weekly, every 2 weeks, daily or monthly
+- **Delete and look up** events from Telegram: `delete gym`, `/today`, `/week`
+- **Syncs everywhere** through iCloud: iPhone, Mac and iPad
 
 ```
 You:  Football next tuesday 8-10pm
