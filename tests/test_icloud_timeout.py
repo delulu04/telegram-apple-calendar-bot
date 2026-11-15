@@ -57,3 +57,59 @@ def test_hanging_save_tells_user_instead_of_freezing(monkeypatch):
 def test_app_handles_messages_in_parallel():
     import inspect
     assert "concurrent_updates(True)" in inspect.getsource(bot.main)
+
+
+class _Cal:
+    def __init__(self, n):
+        self.name = n
+
+
+class _Fresh:
+    def event_calendars(self):
+        return [_Cal("DELS "), _Cal("SCHOOL "), _Cal("WORKOUT ")]
+
+
+def _refresh(ctx):
+    msg = SimpleNamespace(edit_text=AsyncMock())
+    upd = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock(return_value=msg)),
+                          effective_user=SimpleNamespace(id=1))
+    asyncio.run(bot.refresh_cmd(upd, ctx))
+    return upd.message.reply_text.call_args.args[0], msg.edit_text.call_args.args[0]
+
+
+def test_refresh_drops_old_connection_and_reconnects(monkeypatch):
+    monkeypatch.setattr(bot, "allowed", lambda u: True)
+    stale = object()
+    monkeypatch.setattr(bot, "calendar", stale)
+    seen = {}
+    def connect():
+        seen["was"] = bot.calendar
+        return _Fresh()
+    monkeypatch.setattr(bot, "get_calendar", connect)
+    first, final = _refresh(SimpleNamespace(user_data={}))
+    assert seen["was"] is None  # old connection thrown away before reconnecting
+    assert "Reconnecting" in first
+    assert "✅" in final and "3 calendars" in final and "DELS, SCHOOL, WORKOUT" in final
+
+
+def test_refresh_reports_failure(monkeypatch):
+    monkeypatch.setattr(bot, "allowed", lambda u: True)
+    def down():
+        raise ConnectionError("no route")
+    monkeypatch.setattr(bot, "get_calendar", down)
+    _, final = _refresh(SimpleNamespace(user_data={}))
+    assert "⚠️" in final and "no route" in final
+
+
+def test_refresh_ignores_strangers(monkeypatch):
+    monkeypatch.setattr(bot, "allowed", lambda u: False)
+    upd = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()), effective_user=SimpleNamespace(id=9))
+    asyncio.run(bot.refresh_cmd(upd, SimpleNamespace(user_data={})))
+    upd.message.reply_text.assert_not_called()
+
+
+def test_refresh_is_registered():
+    import inspect
+    src = inspect.getsource(bot.main)
+    assert 'CommandHandler("refresh", refresh_cmd)' in src
+    assert 'BotCommand("refresh"' in src

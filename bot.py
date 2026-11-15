@@ -204,7 +204,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         + tags +
         "\n\n🗑 <b>Delete:</b> delete gym (add a date if there are a few: delete gym 16/11)\n"
         "📅 <b>See what's on:</b> /today /tomorrow /week /month, or one day like /18dec or /fri\n"
-        "↩️ /undo removes the last event I added"
+        "↩️ /undo removes the last event I added\n"
+        "🔄 /refresh reconnects to iCloud if I seem stuck"
         + ("\n\n🔔 I'll also message you when something new shows up in your calendar "
            "(like an invite from an email), moves, or gets cancelled." if WATCH_MINUTES > 0 else ""),
         parse_mode="HTML",
@@ -213,6 +214,25 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"To keep those alerts working after I restart, add NOTIFY_CHAT_ID={update.effective_chat.id} "
             "to the bot's settings (Railway → Variables).")
+
+
+async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Throw away the iCloud connection and open a fresh one (also picks up new or renamed calendars)."""
+    if not allowed(update):
+        return
+    global calendar
+    calendar = None
+    msg = await update.message.reply_text("🔄 Reconnecting to iCloud…")
+    try:
+        cal = await icloud(get_calendar)
+        cals = await icloud(cal.event_calendars)
+    except Exception as exc:
+        log.exception("refresh failed")
+        await msg.edit_text(f"⚠️ Still can't reach iCloud: {exc}\nTry /refresh again in a minute.")
+        return
+    names = ", ".join((c.name or "?").strip() for c in cals)
+    await msg.edit_text(f"✅ Reconnected to iCloud. {len(cals)} calendars: {names}\n\n"
+                        "If an event I saved isn't on your phone yet, open Calendar and pull down to refresh.")
 
 
 def _tag_name(name: str) -> str:
@@ -757,6 +777,7 @@ def main():
             BotCommand("where", "Which trip you're on (e.g. /where 18 dec)"),
             BotCommand("delete", "Delete an event (e.g. /delete footie)"),
             BotCommand("undo", "Remove the last event I added"),
+            BotCommand("refresh", "Reconnect to iCloud if I seem stuck"),
             BotCommand("help", "Examples"),
             BotCommand("version", "Which update is running"),
         ])
@@ -766,6 +787,7 @@ def main():
            .concurrent_updates(True).build())
     app.add_handler(CommandHandler(["start", "help"], start_cmd))
     app.add_handler(CommandHandler("undo", undo_cmd))
+    app.add_handler(CommandHandler("refresh", refresh_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))
