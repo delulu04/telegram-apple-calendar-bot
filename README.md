@@ -1,8 +1,8 @@
-# Telegram to Apple Calendar bot
+# Delz Calendar Bot
+
+A Telegram bot by Delia that adds events to Apple Calendar.
 
 Type an event in Telegram, tap how often it repeats, and it lands in your iCloud calendar (so it shows on your iPhone, Mac and iPad). Before saving, the bot checks your calendars and warns you about clashes. If you colour-code with several calendars, add a `#tag` to pick which one.
-
-Forked from [seandias/telegram-apple-calendar-bot](https://github.com/seandias/telegram-apple-calendar-bot). This fork adds calendar tags, shorter durations (`2h`, `90min`), titles kept as typed, `/refresh`, and protection against the bot freezing when iCloud is slow.
 
 ```
 You:  Football next tuesday 8-10pm
